@@ -15,6 +15,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now \
   bt-agent.service \
   owed.service \
+  omarchy-idle-inhibit.service \
   omarchy-recover-internal-monitor.service \
   omarchy-sleep-lock.service \
   omarchy-migrate-notify.service \

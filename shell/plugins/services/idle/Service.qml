@@ -14,6 +14,9 @@ Item {
   readonly property string home: Quickshell.env("HOME")
   readonly property string stayAwakeStateDir: home + "/.local/state/omarchy/indicators"
   readonly property string stayAwakeStatePath: stayAwakeStateDir + "/stay-awake"
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR")
+  readonly property string inhibitorStateDir: runtimeDir ? runtimeDir + "/omarchy/idle-inhibit" : ""
+  readonly property string inhibitorStatePath: inhibitorStateDir ? inhibitorStateDir + "/state" : ""
   readonly property int defaultScreensaverSeconds: 150
   readonly property int defaultLockSeconds: 300
   readonly property var idleConfig: shell && shell.shellConfig && shell.shellConfig.idle
@@ -23,7 +26,7 @@ Item {
   readonly property int firstIdleTimeoutSeconds: Math.min(screensaverTimeoutSeconds, lockTimeoutSeconds)
   readonly property int screensaverDelaySeconds: Math.max(0, screensaverTimeoutSeconds - firstIdleTimeoutSeconds)
   readonly property int lockDelaySeconds: Math.max(0, lockTimeoutSeconds - firstIdleTimeoutSeconds)
-  readonly property bool idleEnabled: stayAwakeStateLoaded && !stayAwake
+  readonly property bool idleEnabled: stayAwakeStateLoaded && !stayAwake && dbusInhibitorCount === 0
   readonly property string screensaverClass: "org.omarchy.screensaver"
 
   property bool stayAwake: false
@@ -36,6 +39,7 @@ Item {
   property string lastEventAt: ""
   property var screensaverWindows: ({})
   property int screensaverWindowCount: 0
+  property int dbusInhibitorCount: 0
 
   function secondsFromConfig(value, fallback) {
     return IdleModel.secondsFromConfig(value, fallback)
@@ -64,6 +68,8 @@ Item {
   }
 
   function launchScreensaver() {
+    if (!root.idleEnabled) return
+
     root.screensaverStartedThisCycle = true
     screensaverLaunchGraceTimer.restart()
     runProcess(screensaverProcess, "screensaver", "[[ $(omarchy-shell lock isLocked 2>/dev/null) == \"true\" ]] || omarchy-launch-screensaver")
@@ -178,6 +184,29 @@ Item {
     else handleActiveSignal()
   }
 
+  function handleInhibitorStateChanged(previous) {
+    switch (IdleModel.inhibitorTransition(previous, root.dbusInhibitorCount)) {
+      case "cancel":
+        if (root.idledThisCycle) root.cancelIdleCycle("dbus-inhibit")
+        break
+      case "rearm":
+        logEvent("dbus-inhibit", "cleared")
+        Qt.callLater(root.handleIdleChanged)
+        break
+    }
+  }
+
+  function parseInhibitorState(text) {
+    var count = IdleModel.inhibitorCountFromText(text)
+
+    if (count !== root.dbusInhibitorCount) {
+      var previous = root.dbusInhibitorCount
+      root.dbusInhibitorCount = count
+      logEvent("dbus-inhibit", "count=" + count)
+      root.handleInhibitorStateChanged(previous)
+    }
+  }
+
   function statusJson() {
     return JSON.stringify({
       enabled: root.idleEnabled,
@@ -192,6 +221,7 @@ Item {
       screensaverDelay: root.screensaverDelaySeconds,
       lockDelay: root.lockDelaySeconds,
       screensaverWindows: root.screensaverWindowCount,
+      dbusInhibitors: root.dbusInhibitorCount,
       timers: {
         screensaver: screensaverTimer.running,
         lock: lockTimer.running,
@@ -330,6 +360,27 @@ Item {
     onFileChanged: root.refreshStayAwakeState()
   }
 
+  Process {
+    id: inhibitorStateProbe
+    running: root.inhibitorStatePath !== ""
+    command: ["omarchy-idle-inhibit-probe", root.inhibitorStatePath]
+    stdout: SplitParser { onRead: function(line) { root.parseInhibitorState(line) } }
+  }
+
+  FileView {
+    path: root.inhibitorStateDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: inhibitorProbeDebounce.restart()
+  }
+
+  Timer {
+    id: inhibitorProbeDebounce
+    interval: 50
+    repeat: false
+    onTriggered: inhibitorStateProbe.running = true
+  }
+
   Component.onCompleted: {
     logEvent("service-ready")
     refreshStayAwakeState()
@@ -355,7 +406,7 @@ Item {
     }
 
     function toggle(): string {
-      return root.setIdleEnabled(!root.idleEnabled)
+      return root.setIdleEnabled(root.stayAwake)
     }
   }
 }
