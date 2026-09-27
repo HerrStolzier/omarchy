@@ -38,6 +38,29 @@ cat > "$scratch/bin/omarchy-notification-send" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$@" >> "$NOTIFICATION_LOG"
 STUB
+
+# Answer only the optional video-quality prompt; never open a real menu.
+cat > "$scratch/bin/omarchy-menu-select" <<'STUB'
+#!/bin/bash
+if [[ ${1:-} == "Select quality" ]]; then
+  printf '%s\n' medium
+else
+  printf 'Unexpected menu selection: %s\n' "$*" >&2
+  exit 99
+fi
+STUB
+
+cat > "$scratch/bin/omarchy-menu-file" <<'STUB'
+#!/bin/bash
+printf 'Unexpected file picker: %s\n' "$*" >&2
+exit 99
+STUB
+
+# The dummy media has no duration; keep quality estimates on their fallback.
+cat > "$scratch/bin/ffprobe" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
 chmod +x "$scratch/bin/"*
 
 check_uri() {
@@ -45,10 +68,10 @@ check_uri() {
   mkdir -p "$(dirname -- "$input")"
   printf 'source\n' > "$input"
   rm -f "$CLIPBOARD_FILE" "$NOTIFICATION_LOG"
-  bash "$ROOT/bin/omarchy-transcode" "$input" "$format" "$resolution"
+  bash "$ROOT/bin/omarchy-transcode" "$input" "$format" "$resolution" || fail "$description"
   printf '%s\n' "$expected" > "$scratch/expected"
   cmp -s "$scratch/expected" "$CLIPBOARD_FILE" || fail "$description"
-  grep -Fxq 'Saved and copied to clipboard.' "$NOTIFICATION_LOG" || fail "successful copy reports completion"
+  grep -q '^Saved and copied to clipboard' "$NOTIFICATION_LOG" || fail "successful copy reports completion"
   pass "$description"
 }
 
@@ -98,17 +121,23 @@ for mime in image/png video/mp4; do
   fi
   if TEST_MIME="$mime" ENCODE_FAIL=1 bash "$ROOT/bin/omarchy-transcode" "$scratch/plain.png" "$format" "$resolution"; then
     fail "encoder failure must fail transcoding"
+  else
+    status=$?
+    (( status == 7 )) || fail "encoder failure is propagated" "exit status: $status"
   fi
   [[ ! -e $CLIPBOARD_FILE ]] || fail "encoder failure must not overwrite the clipboard"
-  ! grep -Fq 'Saved and copied to clipboard.' "$NOTIFICATION_LOG" 2>/dev/null || fail "encoder failure must not report success"
+  ! grep -q '^Saved and copied to clipboard' "$NOTIFICATION_LOG" 2>/dev/null || fail "encoder failure must not report success"
   pass "$mime encoder failures leave the clipboard untouched"
 done
 
 rm -f "$CLIPBOARD_FILE" "$NOTIFICATION_LOG"
 if CLIPBOARD_FAIL=1 bash "$ROOT/bin/omarchy-transcode" "$scratch/plain.png" png low; then
   fail "clipboard failure must fail transcoding"
+else
+  status=$?
+  (( status == 9 )) || fail "clipboard failure is propagated" "exit status: $status"
 fi
-! grep -Fq 'Saved and copied to clipboard.' "$NOTIFICATION_LOG" 2>/dev/null || fail "clipboard failure must not report success"
+! grep -q '^Saved and copied to clipboard' "$NOTIFICATION_LOG" 2>/dev/null || fail "clipboard failure must not report success"
 pass "clipboard failure does not report successful completion"
 
 cat > "$scratch/bin/python3" <<'STUB'
@@ -119,7 +148,10 @@ chmod +x "$scratch/bin/python3"
 rm -f "$CLIPBOARD_FILE" "$NOTIFICATION_LOG"
 if bash "$ROOT/bin/omarchy-transcode" "$scratch/plain.png" png low; then
   fail "URI conversion failure must fail transcoding"
+else
+  status=$?
+  (( status == 10 )) || fail "URI conversion failure is propagated" "exit status: $status"
 fi
 [[ ! -e $CLIPBOARD_FILE ]] || fail "URI conversion failure must not overwrite the clipboard"
-! grep -Fq 'Saved and copied to clipboard.' "$NOTIFICATION_LOG" 2>/dev/null || fail "URI conversion failure must not report success"
+! grep -q '^Saved and copied to clipboard' "$NOTIFICATION_LOG" 2>/dev/null || fail "URI conversion failure must not report success"
 pass "URI conversion failure leaves the clipboard untouched"
