@@ -256,6 +256,11 @@ Item {
     if (!stayAwakeStateProbe.running) stayAwakeStateProbe.running = true
   }
 
+  function refreshInhibitorState() {
+    if (root.inhibitorStateDir === "") return
+    if (!inhibitorStateProbe.running) inhibitorStateProbe.running = true
+  }
+
   function applyStayAwake(value, persist, reason) {
     var enabled = !!value
     var changed = !root.stayAwakeStateLoaded || root.stayAwake !== enabled
@@ -362,12 +367,13 @@ Item {
 
   Process {
     id: inhibitorStateProbe
-    running: root.inhibitorStatePath !== ""
-    command: ["omarchy-idle-inhibit-probe", root.inhibitorStatePath]
+    command: ["bash", "-c", "mkdir -p \"$XDG_RUNTIME_DIR/omarchy/idle-inhibit\"; omarchy-idle-inhibit-probe \"$XDG_RUNTIME_DIR/omarchy/idle-inhibit/state\""]
     stdout: SplitParser { onRead: function(line) { root.parseInhibitorState(line) } }
+    onExited: function() { inhibitorStateDirWatcher.reload() }
   }
 
   FileView {
+    id: inhibitorStateDirWatcher
     path: root.inhibitorStateDir
     watchChanges: true
     printErrors: false
@@ -378,12 +384,13 @@ Item {
     id: inhibitorProbeDebounce
     interval: 50
     repeat: false
-    onTriggered: inhibitorStateProbe.running = true
+    onTriggered: root.refreshInhibitorState()
   }
 
   Component.onCompleted: {
     logEvent("service-ready")
     refreshStayAwakeState()
+    refreshInhibitorState()
   }
 
   IpcHandler {

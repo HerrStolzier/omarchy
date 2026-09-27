@@ -4,17 +4,20 @@
 # omarchy:group=system
 # omarchy:hidden=true
 
-"""Own org.freedesktop.ScreenSaver and PowerManagement.Inhibit for the session.
+"""Own org.freedesktop.ScreenSaver so apps can suppress the screensaver.
 
 Quattro's idle service honors only the Wayland idle-inhibit protocol. Browsers
 and players request inhibit over D-Bus instead. Chromium/Chrome call
-/org/freedesktop/ScreenSaver; VLC and Firefox use /ScreenSaver; Chromium also
-talks to org.freedesktop.PowerManagement.Inhibit. Nothing has owned those
-names since hypridle was replaced (issue #6475).
+/org/freedesktop/ScreenSaver; VLC and Firefox use /ScreenSaver. Nothing has
+owned that name since hypridle was replaced (issue #6475).
 
-This daemon owns both names, exports every path those clients actually call,
-reaps inhibitors when the caller leaves the bus, and publishes JSON state the
-idle service watches.
+This daemon owns ScreenSaver only — the same contract hypridle had. Chromium
+routes display wake locks (playing video) there and routes audio, downloads,
+and WebRTC to org.freedesktop.PowerManagement, which we leave unowned so
+background audio cannot pin the screensaver and lock off.
+
+Inhibitors are reaped when the caller leaves the bus. JSON state is published
+for the idle service to watch.
 """
 
 from __future__ import annotations
@@ -39,9 +42,6 @@ from gi.repository import GLibUnix  # noqa: E402
 
 SS_NAME = "org.freedesktop.ScreenSaver"
 SS_PATHS = ["/org/freedesktop/ScreenSaver", "/ScreenSaver"]
-PM_NAME = "org.freedesktop.PowerManagement"
-PM_IFACE = "org.freedesktop.PowerManagement.Inhibit"
-PM_PATH = "/org/freedesktop/PowerManagement/Inhibit"
 
 SS_XML = """
 <node>
@@ -54,27 +54,6 @@ SS_XML = """
     <method name="UnInhibit">
       <arg name="cookie" type="u" direction="in"/>
     </method>
-  </interface>
-</node>
-"""
-
-PM_XML = """
-<node>
-  <interface name="org.freedesktop.PowerManagement.Inhibit">
-    <method name="Inhibit">
-      <arg name="application" type="s" direction="in"/>
-      <arg name="reason" type="s" direction="in"/>
-      <arg name="cookie" type="u" direction="out"/>
-    </method>
-    <method name="UnInhibit">
-      <arg name="cookie" type="u" direction="in"/>
-    </method>
-    <method name="HasInhibit">
-      <arg name="has_inhibit" type="b" direction="out"/>
-    </method>
-    <signal name="HasInhibitChanged">
-      <arg name="has_inhibit" type="b"/>
-    </signal>
   </interface>
 </node>
 """
@@ -137,7 +116,6 @@ class Daemon:
     self.state_file = state_file
     self.registration_ids: list[int] = []
     self.owned_names = 0
-    self.published_inhibited: bool | None = None
     self.loop: GLib.MainLoop | None = None
 
   def publish(self, snapshot: dict | None = None) -> None:
@@ -157,10 +135,6 @@ class Daemon:
       self.publish()
     except OSError as error:
       print(f"omarchy-idle-inhibit: cannot write {self.state_file} ({error})", file=sys.stderr)
-    inhibited = bool(self.state.cookies)
-    if inhibited != self.published_inhibited:
-      self.published_inhibited = inhibited
-      self.connection.emit_signal(None, PM_PATH, PM_IFACE, "HasInhibitChanged", GLib.Variant("(b)", (inhibited,)))
 
   def handle_inhibit(self, sender: str, params: GLib.Variant, invocation: Gio.DBusMethodInvocation) -> None:
     app, reason = params.unpack()
@@ -178,16 +152,11 @@ class Daemon:
     self.after_change()
     invocation.return_value(None)
 
-  def handle_has_inhibit(self, invocation: Gio.DBusMethodInvocation) -> None:
-    invocation.return_value(GLib.Variant("(b)", (bool(self.state.cookies),)))
-
   def dispatch(self, connection, sender, path, iface, method, params, invocation) -> None:
     if method == "Inhibit":
       self.handle_inhibit(sender, params, invocation)
     elif method == "UnInhibit":
       self.handle_uninhibit(params, invocation)
-    elif method == "HasInhibit":
-      self.handle_has_inhibit(invocation)
 
   def handle_name_owner_changed(self, connection, sender, path, iface, signal, params) -> None:
     name, old_owner, new_owner = params.unpack()
@@ -196,14 +165,10 @@ class Daemon:
 
   def export_objects(self) -> None:
     node_ss = Gio.DBusNodeInfo.new_for_xml(SS_XML)
-    node_pm = Gio.DBusNodeInfo.new_for_xml(PM_XML)
     for path in SS_PATHS:
       self.registration_ids.append(
         self.connection.register_object(path, node_ss.interfaces[0], self.dispatch)
       )
-    self.registration_ids.append(
-      self.connection.register_object(PM_PATH, node_pm.interfaces[0], self.dispatch)
-    )
     self.connection.signal_subscribe(
       "org.freedesktop.DBus",
       "org.freedesktop.DBus",
@@ -269,7 +234,6 @@ def main() -> int:
   daemon.loop = loop
   daemon.export_objects()
   daemon.own_name(SS_NAME)
-  daemon.own_name(PM_NAME)
 
   def on_term():
     daemon.stop_serving()

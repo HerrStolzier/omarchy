@@ -48,7 +48,8 @@ probe_empty="$("$ROOT/bin/omarchy-idle-inhibit-probe" "$test_tmp/missing-state")
 [[ $probe_empty == "" ]] || fail "probe is silent for a missing file" "$probe_empty"
 pass "probe is silent for a missing file"
 
-printf '%s' '{"pid":1,"count":3}' > "$test_tmp/dead-pid-state"
+dead_pid=$(bash -c 'echo $$')
+printf '%s' "{\"pid\":$dead_pid,\"count\":3}" > "$test_tmp/dead-pid-state"
 probe_dead="$("$ROOT/bin/omarchy-idle-inhibit-probe" "$test_tmp/dead-pid-state")"
 [[ $probe_dead == "" ]] || fail "probe is silent for a dead pid" "$probe_dead"
 pass "probe is silent for a dead pid"
@@ -83,24 +84,6 @@ proxy = Gio.DBusProxy.new_sync(
 )
 cookie = proxy.call_sync("Inhibit", GLib.Variant("(ss)", ("brief-app", "momentary")), Gio.DBusCallFlags.NONE, -1, None)
 print(int(cookie.unpack()[0]), flush=True)
-PY
-
-cat >"$test_tmp/hold-pm.py" <<'PY'
-import time
-import gi
-gi.require_version("Gio", "2.0")
-from gi.repository import Gio, GLib
-
-bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-proxy = Gio.DBusProxy.new_sync(
-  bus, Gio.DBusProxyFlags.NONE, None,
-  "org.freedesktop.PowerManagement",
-  "/org/freedesktop/PowerManagement/Inhibit",
-  "org.freedesktop.PowerManagement.Inhibit", None,
-)
-cookie = proxy.call_sync("Inhibit", GLib.Variant("(ss)", ("chromium", "video")), Gio.DBusCallFlags.NONE, -1, None)
-print(int(cookie.unpack()[0]), flush=True)
-time.sleep(30)
 PY
 
 daemon_log="$test_tmp/daemon.log"
@@ -139,12 +122,19 @@ legacy_hold=$(scenario "
 [[ $legacy_hold == "1" ]] || fail "daemon persists a /ScreenSaver inhibitor" "count=$legacy_hold"
 pass "/ScreenSaver Inhibit persists while the caller holds the bus"
 
-pm_hold=$(scenario "
-  python3 '$test_tmp/hold-pm.py' >'$test_tmp/cookie.txt' 2>&1 &
-  sleep 0.8
+pm_owner=$(dbus-run-session -- bash -c "
+  trap 'kill -9 \$(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+  python3 '$ROOT/bin/omarchy-idle-inhibit' --state-file '$state_file' >>'$daemon_log' 2>&1 &
+  for _ in \$(seq 1 30); do
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+      --method org.freedesktop.DBus.NameHasOwner org.freedesktop.ScreenSaver 2>/dev/null | grep -q true && break
+    sleep 0.1
+  done
+  gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.NameHasOwner org.freedesktop.PowerManagement
 ")
-[[ $pm_hold == "1" ]] || fail "PowerManagement Inhibit persists" "count=$pm_hold"
-pass "PowerManagement Inhibit persists while the caller holds the bus"
+[[ $pm_owner == *false* ]] || fail "PowerManagement name stays unowned so audio/downloads cannot pin idle" "$pm_owner"
+pass "PowerManagement name stays unowned so audio/downloads cannot pin idle"
 
 cleared=$(scenario "
   python3 '$test_tmp/hold.py' /org/freedesktop/ScreenSaver >'$test_tmp/cookie.txt' 2>&1 &
@@ -170,6 +160,17 @@ rg -F 'dbusInhibitorCount === 0' "$ROOT/shell/plugins/services/idle/Service.qml"
   || fail "idleEnabled folds D-Bus inhibitors"
 rg -F 'omarchy-idle-inhibit-probe' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
   || fail "idle service probes the inhibit state file"
+rg -F 'mkdir -p \"$XDG_RUNTIME_DIR/omarchy/idle-inhibit\"' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
+  || fail "idle service creates the inhibit state directory before watching it"
+rg -F 'inhibitorStateDirWatcher.reload' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
+  || fail "idle service reloads the inhibit watcher after mkdir"
 rg -F 'setIdleEnabled(root.stayAwake)' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
   || fail "idle toggle derives from stayAwake"
 pass "idle service wires D-Bus inhibitors into idleEnabled"
+
+if awk '/enable --now \\/,/omarchy-crash-watch.service/' "$ROOT/install/user/first-run/enable-user-units.sh" | grep -q omarchy-idle-inhibit.service; then
+  fail "idle-inhibit is not in the batch enable --now list"
+fi
+grep -q 'enable --now omarchy-idle-inhibit.service' "$ROOT/install/user/first-run/enable-user-units.sh" \
+  || fail "idle-inhibit is enabled on its own after the batch"
+pass "first-run enables idle-inhibit separately so a missing unit cannot fail sleep-lock"
