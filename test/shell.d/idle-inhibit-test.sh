@@ -156,6 +156,35 @@ crashed=$(scenario "
 [[ $crashed == "0" ]] || fail "disconnecting caller releases its inhibitor" "count=$crashed state=$(cat "$test_tmp/idle-inhibit/state" 2>/dev/null || true)"
 pass "disconnecting caller releases its inhibitor"
 
+cat >"$test_tmp/release-name.py" <<'PY'
+import time
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+proxy = Gio.DBusProxy.new_sync(
+  bus, Gio.DBusProxyFlags.NONE, None,
+  "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver",
+  "org.freedesktop.ScreenSaver", None,
+)
+proxy.call_sync("Inhibit", GLib.Variant("(ss)", ("player", "Playing video")), Gio.DBusCallFlags.NONE, -1, None)
+names = Gio.DBusProxy.new_sync(
+  bus, Gio.DBusProxyFlags.NONE, None,
+  "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", None,
+)
+names.call_sync("RequestName", GLib.Variant("(su)", ("org.mpris.MediaPlayer2.omarchytest", 0)), Gio.DBusCallFlags.NONE, -1, None)
+names.call_sync("ReleaseName", GLib.Variant("(s)", ("org.mpris.MediaPlayer2.omarchytest",)), Gio.DBusCallFlags.NONE, -1, None)
+time.sleep(30)
+PY
+
+released_name=$(scenario "
+  python3 '$test_tmp/release-name.py' >/dev/null 2>&1 &
+  sleep 0.8
+")
+[[ $released_name == "1" ]] || fail "a caller dropping a well-known name keeps its inhibitor" "count=$released_name"
+pass "a caller dropping a well-known name keeps its inhibitor"
+
 rg -F 'dbusInhibitorCount === 0' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
   || fail "idleEnabled folds D-Bus inhibitors"
 rg -F 'omarchy-idle-inhibit-probe' "$ROOT/shell/plugins/services/idle/Service.qml" >/dev/null \
