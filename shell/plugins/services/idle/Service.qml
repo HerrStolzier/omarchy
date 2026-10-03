@@ -40,6 +40,7 @@ Item {
   property var screensaverWindows: ({})
   property int screensaverWindowCount: 0
   property int dbusInhibitorCount: 0
+  property bool inhibitorRefreshPending: false
 
   function secondsFromConfig(value, fallback) {
     return IdleModel.secondsFromConfig(value, fallback)
@@ -258,7 +259,9 @@ Item {
 
   function refreshInhibitorState() {
     if (root.inhibitorStateDir === "") return
-    if (!inhibitorStateProbe.running) inhibitorStateProbe.running = true
+    // A change that lands while the probe runs may be newer than what it read.
+    if (inhibitorStateProbe.running) root.inhibitorRefreshPending = true
+    else inhibitorStateProbe.running = true
   }
 
   function applyStayAwake(value, persist, reason) {
@@ -369,7 +372,13 @@ Item {
     id: inhibitorStateProbe
     command: ["bash", "-c", "mkdir -p \"$XDG_RUNTIME_DIR/omarchy/idle-inhibit\"; omarchy-idle-inhibit-probe \"$XDG_RUNTIME_DIR/omarchy/idle-inhibit/state\""]
     stdout: SplitParser { onRead: function(line) { root.parseInhibitorState(line) } }
-    onExited: function() { inhibitorStateDirWatcher.reload() }
+    onExited: function() {
+      inhibitorStateDirWatcher.reload()
+      if (root.inhibitorRefreshPending) {
+        root.inhibitorRefreshPending = false
+        root.refreshInhibitorState()
+      }
+    }
   }
 
   FileView {
