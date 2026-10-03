@@ -1,7 +1,7 @@
 echo "Enable the D-Bus idle-inhibit daemon so apps can suppress the screensaver"
 
-# Own org.freedesktop.ScreenSaver and PowerManagement.Inhibit so Chromium,
-# Firefox/Zen, and VLC can keep the screensaver off during playback (#6475).
+# Own org.freedesktop.ScreenSaver so Chromium, Firefox/Zen, and VLC can keep
+# the screensaver off during playback (#6475).
 
 user_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 unit_source="$OMARCHY_PATH/default/systemd/user/omarchy-idle-inhibit.service"
